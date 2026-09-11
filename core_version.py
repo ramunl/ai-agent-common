@@ -144,7 +144,12 @@ def bump_to_latest(submodule_dir: Path, superproject_dir: Path,
         return False, f"Could not checkout core {latest}: {out}"
 
     _git(superproject_dir, "add", submodule_path)
-    code, out = _git(superproject_dir, "commit", "-m", f"bump core to {latest}")
+    code, out = _git(
+        superproject_dir,
+        "-c", "user.name=AI Agent",
+        "-c", "user.email=ai-agent@localhost",
+        "commit", "-m", f"bump core to {latest}",
+    )
     committed = code == 0
     if not committed:
         return False, f"Could not commit core bump: {out}"
