@@ -81,4 +81,53 @@ If you rely on the bots' `/pull` self-update, teach it to run
 `git submodule update --init --recursive` after pulling, or the shared code
 will silently lag behind. This is the main cost of the submodule approach —
 convenient sharing, but updates are a deliberate step, not automatic.
-# ai-agent-common
+
+## Core versioning (/core and /version)
+
+`ai-agent-common` is versioned by **git tags** (v1.0, v2.0, …). Each bot pins a
+tagged release via its submodule pointer. Two numbers per bot:
+
+- **app version** — the bot's own code (VERSION + commit), shown by /version
+- **core version** — which core tag the submodule pins, also shown by /version
+
+### The model
+
+- A plain `/deploy` updates the **app** and runs `git submodule update`, which
+  syncs the core to the **pinned** tag — reproducible, never chases upstream.
+- `/core update` is the deliberate step that moves the pin to the **latest**
+  core tag, commits and pushes the new pointer, then triggers a deploy so it
+  goes live. This is the only thing that advances the core version.
+
+So: releasing new core = tag it in ai-agent-common (`git tag v2.0 && git push
+--tags`). Bots stay on their pinned tag until you run /core update on each.
+
+### Wiring it into a bot
+
+```python
+from pathlib import Path
+from ai_agent_common import CoreCommand
+
+ROOT = Path(__file__).resolve().parent.parent
+core = CoreCommand(
+    submodule_dir=ROOT / "ai_agent_common",
+    superproject_dir=ROOT,
+    submodule_path="ai_agent_common",
+    deploy=schedule_self_deploy,   # bot's own deploy trigger (e.g. runs update-ai-*)
+)
+
+# /version handler — append core.short_line() to the app version:
+text = get_runtime_version("ai-coding-agent", ROOT) + "\n" + core.short_line()
+
+# /core handler:
+async def core_cmd(update, context):
+    if require_authorized(update):
+        wants_update = context.args and context.args[0] == "update"
+        if wants_update:
+            await reply(update, await asyncio.to_thread(core.update_text))
+        else:
+            await reply(update, await asyncio.to_thread(core.status_text))
+```
+
+`short_line()` is local-only (no network) so /version stays fast; `status_text()`
+fetches tags to report "updatable". `update_text()` bumps the pin, pushes, and
+calls your deploy callback.
