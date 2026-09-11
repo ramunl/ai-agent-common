@@ -94,12 +94,13 @@ tagged release via its submodule pointer. Two numbers per bot:
 
 - A plain `/deploy` updates the **app** and runs `git submodule update`, which
   syncs the core to the **pinned** tag — reproducible, never chases upstream.
-- `/core update` is the deliberate step that moves the pin to the **latest**
-  core tag, commits and pushes the new pointer, then triggers a deploy so it
-  goes live. This is the only thing that advances the core version.
+- `/core` on each bot is read-only and reports that bot's pinned core version.
+- `/core update <bot>` runs only from the coding-agent hub. It moves the chosen
+  bot's pin to the **latest** core tag, pushes the pointer, and deploys that bot.
 
 So: releasing new core = tag it in ai-agent-common (`git tag v2.0 && git push
---tags`). Bots stay on their pinned tag until you run /core update on each.
+--tags`). Bots stay on their pinned tag until the coding agent runs
+`/core update <bot>` for each one.
 
 ### Wiring it into a bot
 
@@ -112,22 +113,23 @@ core = CoreCommand(
     submodule_dir=ROOT / "ai_agent_common",
     superproject_dir=ROOT,
     submodule_path="ai_agent_common",
-    deploy=schedule_self_deploy,   # bot's own deploy trigger (e.g. runs update-ai-*)
+    agent_name="ai-coding-agent",
 )
 
 # /version handler — append core.short_line() to the app version:
 text = get_runtime_version("ai-coding-agent", ROOT) + "\n" + core.short_line()
 
-# /core handler:
+# Read-only /core handler:
 async def core_cmd(update, context):
     if require_authorized(update):
-        wants_update = context.args and context.args[0] == "update"
-        if wants_update:
-            await reply(update, await asyncio.to_thread(core.update_text))
-        else:
-            await reply(update, await asyncio.to_thread(core.status_text))
+        await reply(update, await asyncio.to_thread(core.status_text))
+
+# Optional best-effort startup notification:
+notice = await asyncio.to_thread(core.outdated_notice)
+if notice:
+    await bot.send_message(chat_id=CHAT_ID, text=notice)
 ```
 
 `short_line()` is local-only (no network) so /version stays fast; `status_text()`
-fetches tags to report "updatable". `update_text()` bumps the pin, pushes, and
-calls your deploy callback.
+and `outdated_notice()` fetch tags. Fleet updates are owned by the coding agent,
+which calls `bump_to_latest()` for the selected bot and then deploys it.

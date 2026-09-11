@@ -1,29 +1,21 @@
-"""Shared /core command for every agent bot.
+"""Read-only /core for every agent bot, plus a startup drift check.
 
-Each bot wires this in with its own paths and a deploy callback. The version
-logic and the pin-bump are shared (core_version); only the "how do I redeploy
-myself" step is bot-specific and injected.
+Model B: each bot reports ITS OWN pinned core version (genuinely common — every
+bot runs it on itself). Updating a bot's core is fleet management and lives only
+in the coding-agent hub. So this class has no update/deploy path.
 
-Usage in a bot:
-
-    from ai_agent_common.core_command import CoreCommand
-
-    core = CoreCommand(
-        submodule_dir=ROOT / "ai_agent_common",
-        superproject_dir=ROOT,
-        submodule_path="ai_agent_common",
-        deploy=lambda: schedule_deploy(),   # bot's own deploy trigger
-    )
-
-    # /core        -> await reply(core.status_text())
-    # /core update -> await reply(core.update_text())   (bumps pin, then deploys)
+On startup, a bot calls outdated_notice() to learn if its core is behind the
+latest tag and, if so, message the owner. The check is best-effort: a failed
+fetch returns None and never blocks or breaks startup.
 """
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
-from ai_agent_common.core_version import bump_to_latest, core_status
+from ai_agent_common.core_version import core_status
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -31,7 +23,7 @@ class CoreCommand:
     submodule_dir: Path
     superproject_dir: Path
     submodule_path: str
-    deploy: Callable[[], str] | None = None
+    agent_name: str = "this agent"
 
     def status_text(self, check_remote: bool = True) -> str:
         status = core_status(self.submodule_dir, check_remote=check_remote)
@@ -39,28 +31,33 @@ class CoreCommand:
         if status.updatable:
             return (
                 f"{line}\nLatest: {status.latest} — updatable.\n"
-                "Run /core update to adopt it."
+                "Update is run from the coding agent: /core update <bot>."
             )
         checked = "latest available" if status.checked_remote else "latest known locally"
         return f"{line}\nUp to date ({checked}: {status.latest})."
 
     def short_line(self) -> str:
-        """One line for embedding in /version. Local-only, so it never blocks."""
+        """One line for /version. Local-only, so it never blocks on the network."""
         status = core_status(self.submodule_dir, check_remote=False)
         flag = " (updatable)" if status.updatable else ""
         return f"core: {status.current}{flag}"
 
-    def update_text(self) -> str:
-        changed, message = bump_to_latest(
-            self.submodule_dir, self.superproject_dir, self.submodule_path
-        )
-        if not changed:
-            return message  # already latest, or an error — reported as-is
-        has_deploy = self.deploy is not None
-        if has_deploy:
-            deploy_note = self.deploy()
-            return f"{message}\n{deploy_note}"
-        return (
-            f"{message}\nRun /deploy to make it live "
-            "(the pin is pushed but this bot is still running the old core)."
-        )
+    def outdated_notice(self) -> str | None:
+        """A startup message IF core is behind the latest tag, else None.
+
+        Best-effort and network-touching (fetches tags): any failure is logged
+        and returns None, so a boot-time check can never prevent the bot from
+        starting. Silent when up to date — only speaks when there's an action.
+        """
+        try:
+            status = core_status(self.submodule_dir, check_remote=True)
+        except Exception as error:  # never let a version check break startup
+            logger.warning("Core drift check failed (ignored): %s", error)
+            return None
+        if status.updatable:
+            return (
+                f"⚠️ {self.agent_name}: core {status.current} is behind "
+                f"{status.latest}.\nUpdate from the coding agent: "
+                f"/core update <bot>."
+            )
+        return None
