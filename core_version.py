@@ -85,7 +85,9 @@ def current_version(submodule_dir: Path) -> str:
 
 def latest_version(submodule_dir: Path, fetch: bool = True) -> str | None:
     if fetch:
-        _git(submodule_dir, "fetch", "--tags", "--quiet")
+        # --prune --prune-tags removes local tags deleted upstream, so a
+        # deleted release stops showing as "available" everywhere.
+        _git(submodule_dir, "fetch", "--tags", "--prune", "--prune-tags", "--quiet")
     code, out = _git(submodule_dir, "tag", "-l")
     listed = code == 0
     if listed:
@@ -127,7 +129,7 @@ def bump_to_latest(submodule_dir: Path, superproject_dir: Path,
     on latest'. This is the deliberate adopt-new-core step; a deploy afterward
     (or the caller) makes it live.
     """
-    _git(submodule_dir, "fetch", "--tags", "--quiet")
+    _git(submodule_dir, "fetch", "--tags", "--prune", "--prune-tags", "--quiet")
     latest = latest_version(submodule_dir, fetch=False)
     has_latest = latest is not None
     if not has_latest:
@@ -160,3 +162,57 @@ def bump_to_latest(submodule_dir: Path, superproject_dir: Path,
         return False, f"Committed core bump to {latest} but push failed: {out}"
 
     return True, f"Core bumped to {latest} and pushed."
+
+
+def create_release(core_dir: Path, version: str, note: str) -> tuple[bool, str]:
+    """Tag origin/main of ai-agent-common as a new release. Hub-only action.
+
+    Guards, in order: valid version format; a note is required; origin/main
+    must be AHEAD of the latest tag (no hollow re-tag); version must be
+    strictly higher than the latest release; the tag must not already exist.
+    Tags origin/main directly, so it never disturbs the submodule's pinned
+    checkout. Rolls back the local tag if the push fails.
+    """
+    new_key = _parse(version)
+    if new_key is None:
+        return False, f"'{version}' is not a valid version. Use vMAJOR.MINOR (e.g. v2.0)."
+    if not note.strip():
+        return False, "A release note is required: /core release <version> <what changed>."
+
+    _git(core_dir, "fetch", "origin", "main", "--tags", "--prune", "--prune-tags", "--quiet")
+
+    code, main_commit = _git(core_dir, "rev-parse", "origin/main")
+    if code != 0:
+        return False, f"Could not resolve origin/main: {main_commit}"
+
+    latest = latest_version(core_dir, fetch=False)
+    has_latest = latest is not None
+    if has_latest:
+        _, latest_commit = _git(core_dir, "rev-parse", f"refs/tags/{latest}")
+        no_new_commits = main_commit == latest_commit
+        if no_new_commits:
+            return False, (
+                f"origin/main is already tagged {latest} - no new commits to "
+                "release. Change and push core code first, then release."
+            )
+        not_higher = new_key <= _parse(latest)
+        if not_higher:
+            return False, f"{version} is not higher than the latest release {latest}."
+
+    code, _ = _git(core_dir, "rev-parse", "-q", "--verify", f"refs/tags/{version}")
+    tag_exists = code == 0
+    if tag_exists:
+        return False, f"Tag {version} already exists."
+
+    _git(core_dir, "config", "user.name", "ai-agent-common release")
+    _git(core_dir, "config", "user.email", "release@localhost")
+    code, out = _git(core_dir, "tag", "-a", version, main_commit, "-m", note)
+    if code != 0:
+        return False, f"Could not create tag {version}: {out}"
+
+    code, out = _git(core_dir, "push", "origin", version)
+    if code != 0:
+        _git(core_dir, "tag", "-d", version)
+        return False, f"Created {version} locally but push failed (rolled back): {out}"
+
+    return True, f"Released {version} at {main_commit[:7]}.\nNote: {note}"

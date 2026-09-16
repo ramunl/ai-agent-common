@@ -121,3 +121,45 @@ class BumpTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CreateReleaseTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        core = self.tmp / "core"
+        core.mkdir()
+        _git(core, "init", "-b", "main")
+        (core / "f").write_text("1"); _git(core, "add", "-A"); _git(core, "commit", "-m", "c1"); _git(core, "tag", "v1.0")
+        subprocess.run(["git", "clone", "-q", "--bare", str(core), str(self.tmp / "origin.git")], check=True)
+        self.work = self.tmp / "work"
+        subprocess.run(["git", "clone", "-q", str(self.tmp / "origin.git"), str(self.work)], check=True)
+        _git(self.work, "push", "origin", "v1.0")
+
+    def _add_real_commit(self):
+        (self.work / "f").write_text("2"); _git(self.work, "add", "-A"); _git(self.work, "commit", "-m", "real"); _git(self.work, "push", "origin", "main")
+
+    def test_rejects_invalid_version(self):
+        ok, msg = cv.create_release(self.work, "two", "note")
+        self.assertFalse(ok); self.assertIn("valid version", msg)
+
+    def test_requires_note(self):
+        self._add_real_commit()
+        ok, msg = cv.create_release(self.work, "v2.0", "")
+        self.assertFalse(ok); self.assertIn("note is required", msg)
+
+    def test_rejects_hollow_release(self):
+        ok, msg = cv.create_release(self.work, "v2.0", "note")
+        self.assertFalse(ok); self.assertIn("no new commits", msg)
+
+    def test_rejects_backwards_version(self):
+        self._add_real_commit()
+        ok, msg = cv.create_release(self.work, "v0.5", "note")
+        self.assertFalse(ok); self.assertIn("not higher", msg)
+
+    def test_successful_release_tags_and_pushes(self):
+        self._add_real_commit()
+        ok, msg = cv.create_release(self.work, "v2.0", "real change")
+        self.assertTrue(ok, msg)
+        # tag exists on origin
+        result = subprocess.run(["git", "-C", str(self.tmp / "origin.git"), "tag"], capture_output=True, text=True)
+        self.assertIn("v2.0", result.stdout)
