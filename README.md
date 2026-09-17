@@ -14,7 +14,8 @@ defined once, not re-implemented per bot.
   the Telegram command menu.
 - `agent_version` — consistent `/version` output, parameterized by the bot's
   own name and repo root.
-- `buttons` — inline-keyboard builders (`keyboard`, `choice_keyboard`),
+- `buttons` — inline-keyboard builders (`keyboard`, `choice_keyboard`,
+  `command_keyboard`),
   namespaced callback data (`make_callback_data`/`parse_callback_data`, with the
   64-byte Telegram limit enforced), and a `CallbackRouter` to dispatch taps.
 
@@ -36,7 +37,7 @@ from pathlib import Path
 from ai_agent_common import (
     Command, build_command_list, render_help, to_bot_commands,
     is_authorized, get_runtime_version,
-    choice_keyboard, CallbackRouter,
+    choice_keyboard, command_keyboard, CallbackRouter,
 )
 
 ROOT = Path(__file__).resolve().parent.parent  # the BOT's repo root
@@ -63,6 +64,45 @@ async def on_repo_use(update, context, project):
 router.register("repo_use", on_repo_use)
 app.add_handler(CallbackQueryHandler(router.dispatch))
 ```
+
+### Help and version buttons
+
+`command_keyboard()` provides a single row containing **Help** and **Version**.
+Their callback data is `command:help` and `command:version`, so wire the shared
+`command` action into the same callback router used by the bot's other buttons:
+
+```python
+await update.message.reply_text("Commands:", reply_markup=command_keyboard())
+
+async def on_command_button(update, context, command):
+    handlers = {"help": help_cmd, "version": version_cmd}
+    handler = handlers.get(command)
+    if handler is not None:
+        await handler(update, context)
+
+router.register("command", on_command_button)
+```
+
+Callback-query updates do not have `update.message`. The existing help and
+version handlers must therefore reply through the callback query's message (or
+a shared reply helper), for example:
+
+```python
+async def reply(update, text):
+    message = update.message or update.callback_query.message
+    await message.reply_text(text)
+
+async def help_cmd(update, context):
+    if is_authorized(update, CHAT_ID):
+        await reply(update, render_help("Coding AI Agent", COMMANDS))
+
+async def version_cmd(update, context):
+    if is_authorized(update, CHAT_ID):
+        await reply(update, get_runtime_version("ai-coding-agent", ROOT))
+```
+
+Register the action before adding `CallbackQueryHandler(router.dispatch)`.
+The router answers each callback query before invoking the registered handler.
 
 Register autocomplete once at startup: `await app.bot.set_my_commands(to_bot_commands(COMMANDS))`.
 
