@@ -1,7 +1,10 @@
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import ai_agent_common
 from ai_agent_common import agent_auth, agent_help, buttons
 
 
@@ -51,6 +54,36 @@ class HelpTests(unittest.TestCase):
 
 
 class ButtonTests(unittest.TestCase):
+    def test_command_keyboard_labels_layout_and_callback_data(self) -> None:
+        class InlineKeyboardButton:
+            def __init__(self, text, callback_data):
+                self.text = text
+                self.callback_data = callback_data
+
+        class InlineKeyboardMarkup:
+            def __init__(self, inline_keyboard):
+                self.inline_keyboard = inline_keyboard
+
+        telegram = SimpleNamespace(
+            InlineKeyboardButton=InlineKeyboardButton,
+            InlineKeyboardMarkup=InlineKeyboardMarkup,
+        )
+        with patch.dict(sys.modules, {"telegram": telegram}):
+            markup = buttons.command_keyboard()
+
+        self.assertEqual(len(markup.inline_keyboard), 1)
+        self.assertEqual(
+            [button.text for button in markup.inline_keyboard[0]],
+            ["Help", "Version"],
+        )
+        self.assertEqual(
+            [button.callback_data for button in markup.inline_keyboard[0]],
+            ["command:help", "command:version"],
+        )
+
+    def test_command_keyboard_is_exposed_from_package(self) -> None:
+        self.assertIs(ai_agent_common.command_keyboard, buttons.command_keyboard)
+
     def test_callback_data_roundtrip(self) -> None:
         data = buttons.make_callback_data("repo_use", "channel-cast")
         self.assertEqual(data, "repo_use:channel-cast")
@@ -77,6 +110,18 @@ class ButtonTests(unittest.TestCase):
         handler, arg = router.resolve("nope:x")
         self.assertIsNone(handler)
         self.assertEqual(arg, "x")
+
+    def test_router_resolves_command_buttons(self) -> None:
+        router = buttons.CallbackRouter()
+        marker = object()
+        router.register("command", marker)
+
+        for data, command in (("command:help", "help"),
+                              ("command:version", "version")):
+            with self.subTest(data=data):
+                handler, arg = router.resolve(data)
+                self.assertIs(handler, marker)
+                self.assertEqual(arg, command)
 
 
 if __name__ == "__main__":

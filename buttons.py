@@ -59,6 +59,18 @@ def choice_keyboard(action: str, items: list[str], active: str | None = None,
     return keyboard(options, columns=columns)
 
 
+def command_keyboard():
+    """Build the shared Help and Version command keyboard.
+
+    Both buttons use the ``command`` callback namespace. Register that action
+    with :class:`CallbackRouter` and dispatch on the supplied command name.
+    """
+    return keyboard([
+        ("Help", make_callback_data("command", "help")),
+        ("Version", make_callback_data("command", "version")),
+    ])
+
+
 class CallbackRouter:
     """Routes a button tap to a handler by its action prefix.
 
