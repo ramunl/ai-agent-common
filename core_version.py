@@ -23,9 +23,9 @@ _VERSION_RE = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?$")
 
 @dataclass(frozen=True)
 class CoreStatus:
-    current: str          # pinned tag, e.g. "v1.0" (or "v1.0-3-g…" if ahead of a tag)
-    latest: str           # newest available tag, e.g. "v2.0"
-    updatable: bool       # latest is a strictly higher release than current
+    current: str  # pinned tag, e.g. "v1.0" (or "v1.0-3-g…" if ahead of a tag)
+    latest: str  # newest available tag, e.g. "v2.0"
+    updatable: bool  # latest is a strictly higher release than current
     checked_remote: bool  # whether 'latest' reflects a fetch (vs local-only)
 
 
@@ -83,25 +83,30 @@ def current_version(submodule_dir: Path) -> str:
     return "unknown"
 
 
-def latest_version(submodule_dir: Path, fetch: bool = True) -> str | None:
+def latest_version(submodule_dir: Path, fetch: bool = True) -> tuple[str | None, bool]:
+    """Return the latest known tag and whether fetching tags succeeded.
+
+    Failed or skipped fetches still use locally cached tags.
+    """
+    fetch_succeeded = False
     if fetch:
         # --prune --prune-tags removes local tags deleted upstream, so a
         # deleted release stops showing as "available" everywhere.
-        _git(submodule_dir, "fetch", "--tags", "--prune", "--prune-tags", "--quiet")
+        code, _ = _git(
+            submodule_dir, "fetch", "--tags", "--prune", "--prune-tags", "--quiet"
+        )
+        fetch_succeeded = code == 0
     code, out = _git(submodule_dir, "tag", "-l")
     listed = code == 0
     if listed:
         tags = [line for line in out.splitlines() if line.strip()]
-        return latest_tag(tags)
-    return None
+        return latest_tag(tags), fetch_succeeded
+    return None, fetch_succeeded
 
 
 def core_status(submodule_dir: Path, check_remote: bool = True) -> CoreStatus:
     current = current_version(submodule_dir)
-    if check_remote:
-        latest = latest_version(submodule_dir, fetch=True)
-    else:
-        latest = latest_version(submodule_dir, fetch=False)
+    latest, fetch_succeeded = latest_version(submodule_dir, fetch=check_remote)
 
     has_latest = latest is not None
     resolved_latest = latest if has_latest else current
@@ -109,20 +114,19 @@ def core_status(submodule_dir: Path, check_remote: bool = True) -> CoreStatus:
     current_key = _parse(_base_tag(current))
     latest_key = _parse(resolved_latest) if has_latest else None
     updatable = (
-        current_key is not None
-        and latest_key is not None
-        and latest_key > current_key
+        current_key is not None and latest_key is not None and latest_key > current_key
     )
     return CoreStatus(
         current=current,
         latest=resolved_latest,
         updatable=updatable,
-        checked_remote=check_remote,
+        checked_remote=fetch_succeeded,
     )
 
 
-def bump_to_latest(submodule_dir: Path, superproject_dir: Path,
-                   submodule_path: str) -> tuple[bool, str]:
+def bump_to_latest(
+    submodule_dir: Path, superproject_dir: Path, submodule_path: str
+) -> tuple[bool, str]:
     """Move the pin to the latest core tag, commit and push the superproject.
 
     Returns (changed, message). changed=False with ok message means 'already
@@ -130,7 +134,7 @@ def bump_to_latest(submodule_dir: Path, superproject_dir: Path,
     (or the caller) makes it live.
     """
     _git(submodule_dir, "fetch", "--tags", "--prune", "--prune-tags", "--quiet")
-    latest = latest_version(submodule_dir, fetch=False)
+    latest, _ = latest_version(submodule_dir, fetch=False)
     has_latest = latest is not None
     if not has_latest:
         return False, "No tagged core releases found to update to."
@@ -148,9 +152,13 @@ def bump_to_latest(submodule_dir: Path, superproject_dir: Path,
     _git(superproject_dir, "add", submodule_path)
     code, out = _git(
         superproject_dir,
-        "-c", "user.name=AI Agent",
-        "-c", "user.email=ai-agent@localhost",
-        "commit", "-m", f"bump core to {latest}",
+        "-c",
+        "user.name=AI Agent",
+        "-c",
+        "user.email=ai-agent@localhost",
+        "commit",
+        "-m",
+        f"bump core to {latest}",
     )
     committed = code == 0
     if not committed:
@@ -175,17 +183,32 @@ def create_release(core_dir: Path, version: str, note: str) -> tuple[bool, str]:
     """
     new_key = _parse(version)
     if new_key is None:
-        return False, f"'{version}' is not a valid version. Use vMAJOR.MINOR (e.g. v2.0)."
+        return (
+            False,
+            f"'{version}' is not a valid version. Use vMAJOR.MINOR (e.g. v2.0).",
+        )
     if not note.strip():
-        return False, "A release note is required: /core release <version> <what changed>."
+        return (
+            False,
+            "A release note is required: /core release <version> <what changed>.",
+        )
 
-    _git(core_dir, "fetch", "origin", "main", "--tags", "--prune", "--prune-tags", "--quiet")
+    _git(
+        core_dir,
+        "fetch",
+        "origin",
+        "main",
+        "--tags",
+        "--prune",
+        "--prune-tags",
+        "--quiet",
+    )
 
     code, main_commit = _git(core_dir, "rev-parse", "origin/main")
     if code != 0:
         return False, f"Could not resolve origin/main: {main_commit}"
 
-    latest = latest_version(core_dir, fetch=False)
+    latest, _ = latest_version(core_dir, fetch=False)
     has_latest = latest is not None
     if has_latest:
         _, latest_commit = _git(core_dir, "rev-parse", f"refs/tags/{latest}")

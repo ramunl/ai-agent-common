@@ -2,15 +2,27 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ai_agent_common import core_version as cv
 
 
 def _git(cwd: Path, *args: str) -> None:
     subprocess.run(
-        ["git", "-c", "user.email=t@t.com", "-c", "user.name=t",
-         "-c", "protocol.file.allow=always", *args],
-        cwd=cwd, check=True, capture_output=True, text=True,
+        [
+            "git",
+            "-c",
+            "user.email=t@t.com",
+            "-c",
+            "user.name=t",
+            "-c",
+            "protocol.file.allow=always",
+            *args,
+        ],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
     )
 
 
@@ -51,7 +63,9 @@ class StatusTests(unittest.TestCase):
 
         # a clone pinned at v1.0 (stands in for the submodule dir)
         self.pinned = self.tmp / "pinned"
-        subprocess.run(["git", "clone", "-q", str(self.core), str(self.pinned)], check=True)
+        subprocess.run(
+            ["git", "clone", "-q", str(self.core), str(self.pinned)], check=True
+        )
         _git(self.pinned, "checkout", "tags/v1.0")
 
     def test_current_version_is_pinned_tag(self) -> None:
@@ -62,6 +76,7 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(status.current, "v1.0")
         self.assertEqual(status.latest, "v2.0")
         self.assertTrue(status.updatable)
+        self.assertTrue(status.checked_remote)
 
     def test_status_not_updatable_at_latest(self) -> None:
         _git(self.pinned, "fetch", "--tags")
@@ -69,6 +84,7 @@ class StatusTests(unittest.TestCase):
         status = cv.core_status(self.pinned, check_remote=True)
         self.assertEqual(status.current, "v2.0")
         self.assertFalse(status.updatable)
+        self.assertTrue(status.checked_remote)
 
     def test_local_only_status_uses_tags_already_present(self) -> None:
         # A full clone already has v2.0 locally, so even without fetching,
@@ -78,6 +94,37 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(status.latest, "v2.0")
         self.assertFalse(status.checked_remote)
 
+    def test_latest_version_fetches_new_tags(self) -> None:
+        _git(self.core, "tag", "v3.0")
+        self.assertEqual(cv.latest_version(self.pinned), ("v3.0", True))
+
+    def test_latest_version_skips_fetch(self) -> None:
+        _git(self.core, "tag", "v3.0")
+        with patch.object(cv, "_git", wraps=cv._git) as git:
+            self.assertEqual(
+                cv.latest_version(self.pinned, fetch=False), ("v2.0", False)
+            )
+        git.assert_called_once_with(self.pinned, "tag", "-l")
+
+    def test_latest_version_without_tags(self) -> None:
+        _git(self.core, "tag", "-d", "v1.0", "v2.0")
+        self.assertEqual(cv.latest_version(self.pinned), (None, True))
+        self.assertEqual(cv.latest_version(self.pinned, fetch=False), (None, False))
+
+    def test_latest_version_when_tag_listing_fails(self) -> None:
+        self.assertEqual(cv.latest_version(self.tmp / "missing"), (None, False))
+
+    def test_failed_fetch_preserves_local_tags_without_claiming_remote_check(
+        self,
+    ) -> None:
+        _git(self.pinned, "remote", "set-url", "origin", str(self.tmp / "missing.git"))
+        status = cv.core_status(self.pinned, check_remote=True)
+        self.assertEqual(status.current, "v1.0")
+        self.assertEqual(status.latest, "v2.0")
+        self.assertTrue(status.updatable)
+        self.assertFalse(status.checked_remote)
+        self.assertEqual(cv.latest_version(self.pinned), ("v2.0", False))
+
 
 class BumpTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -86,21 +133,46 @@ class BumpTests(unittest.TestCase):
         core.mkdir()
         _git(core, "init", "-b", "main")
         (core / "c.txt").write_text("1")
-        _git(core, "add", "-A"); _git(core, "commit", "-m", "1.0"); _git(core, "tag", "v1.0")
+        _git(core, "add", "-A")
+        _git(core, "commit", "-m", "1.0")
+        _git(core, "tag", "v1.0")
         (core / "c.txt").write_text("2")
-        _git(core, "add", "-A"); _git(core, "commit", "-m", "2.0"); _git(core, "tag", "v2.0")
-        subprocess.run(["git", "clone", "-q", "--bare", str(core), str(self.tmp / "core.git")], check=True)
+        _git(core, "add", "-A")
+        _git(core, "commit", "-m", "2.0")
+        _git(core, "tag", "v2.0")
+        subprocess.run(
+            ["git", "clone", "-q", "--bare", str(core), str(self.tmp / "core.git")],
+            check=True,
+        )
 
         self.super = self.tmp / "super"
         self.super.mkdir()
         _git(self.super, "init", "-b", "main")
         (self.super / "app.txt").write_text("app")
-        _git(self.super, "add", "-A"); _git(self.super, "commit", "-m", "init")
-        _git(self.super, "submodule", "add", str(self.tmp / "core.git"), "ai_agent_common")
+        _git(self.super, "add", "-A")
+        _git(self.super, "commit", "-m", "init")
+        _git(
+            self.super,
+            "submodule",
+            "add",
+            str(self.tmp / "core.git"),
+            "ai_agent_common",
+        )
         _git(self.super / "ai_agent_common", "checkout", "tags/v1.0")
-        _git(self.super, "add", "-A"); _git(self.super, "commit", "-m", "pin v1.0")
+        _git(self.super, "add", "-A")
+        _git(self.super, "commit", "-m", "pin v1.0")
         # a bare origin so push has somewhere to go
-        subprocess.run(["git", "clone", "-q", "--bare", str(self.super), str(self.tmp / "super.git")], check=True)
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "-q",
+                "--bare",
+                str(self.super),
+                str(self.tmp / "super.git"),
+            ],
+            check=True,
+        )
         _git(self.super, "remote", "add", "origin", str(self.tmp / "super.git"))
         # push branch so 'git push' has an upstream
         _git(self.super, "push", "-u", "origin", "main")
@@ -129,37 +201,57 @@ class CreateReleaseTests(unittest.TestCase):
         core = self.tmp / "core"
         core.mkdir()
         _git(core, "init", "-b", "main")
-        (core / "f").write_text("1"); _git(core, "add", "-A"); _git(core, "commit", "-m", "c1"); _git(core, "tag", "v1.0")
-        subprocess.run(["git", "clone", "-q", "--bare", str(core), str(self.tmp / "origin.git")], check=True)
+        (core / "f").write_text("1")
+        _git(core, "add", "-A")
+        _git(core, "commit", "-m", "c1")
+        _git(core, "tag", "v1.0")
+        subprocess.run(
+            ["git", "clone", "-q", "--bare", str(core), str(self.tmp / "origin.git")],
+            check=True,
+        )
         self.work = self.tmp / "work"
-        subprocess.run(["git", "clone", "-q", str(self.tmp / "origin.git"), str(self.work)], check=True)
+        subprocess.run(
+            ["git", "clone", "-q", str(self.tmp / "origin.git"), str(self.work)],
+            check=True,
+        )
         _git(self.work, "push", "origin", "v1.0")
 
     def _add_real_commit(self):
-        (self.work / "f").write_text("2"); _git(self.work, "add", "-A"); _git(self.work, "commit", "-m", "real"); _git(self.work, "push", "origin", "main")
+        (self.work / "f").write_text("2")
+        _git(self.work, "add", "-A")
+        _git(self.work, "commit", "-m", "real")
+        _git(self.work, "push", "origin", "main")
 
     def test_rejects_invalid_version(self):
         ok, msg = cv.create_release(self.work, "two", "note")
-        self.assertFalse(ok); self.assertIn("valid version", msg)
+        self.assertFalse(ok)
+        self.assertIn("valid version", msg)
 
     def test_requires_note(self):
         self._add_real_commit()
         ok, msg = cv.create_release(self.work, "v2.0", "")
-        self.assertFalse(ok); self.assertIn("note is required", msg)
+        self.assertFalse(ok)
+        self.assertIn("note is required", msg)
 
     def test_rejects_hollow_release(self):
         ok, msg = cv.create_release(self.work, "v2.0", "note")
-        self.assertFalse(ok); self.assertIn("no new commits", msg)
+        self.assertFalse(ok)
+        self.assertIn("no new commits", msg)
 
     def test_rejects_backwards_version(self):
         self._add_real_commit()
         ok, msg = cv.create_release(self.work, "v0.5", "note")
-        self.assertFalse(ok); self.assertIn("not higher", msg)
+        self.assertFalse(ok)
+        self.assertIn("not higher", msg)
 
     def test_successful_release_tags_and_pushes(self):
         self._add_real_commit()
         ok, msg = cv.create_release(self.work, "v2.0", "real change")
         self.assertTrue(ok, msg)
         # tag exists on origin
-        result = subprocess.run(["git", "-C", str(self.tmp / "origin.git"), "tag"], capture_output=True, text=True)
+        result = subprocess.run(
+            ["git", "-C", str(self.tmp / "origin.git"), "tag"],
+            capture_output=True,
+            text=True,
+        )
         self.assertIn("v2.0", result.stdout)
