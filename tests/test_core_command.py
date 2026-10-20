@@ -25,6 +25,31 @@ class CoreCommandTests(unittest.TestCase):
         self.assertIn("v2.0", notice)
         self.assertIn("/core update <bot>", notice)
 
+    def test_status_wording_reflects_successful_fetch(self) -> None:
+        for updatable in (False, True):
+            for checked_remote in (False, True):
+                with self.subTest(updatable=updatable, checked_remote=checked_remote):
+                    current = "v1.0" if updatable else "v2.0"
+                    status = CoreStatus(current, "v2.0", updatable, checked_remote)
+                    with patch(
+                        "ai_agent_common.core_command.core_status", return_value=status
+                    ):
+                        text = self.command.status_text()
+                    expected = (
+                        "latest available" if checked_remote else "latest known locally"
+                    )
+                    unexpected = (
+                        "latest known locally" if checked_remote else "latest available"
+                    )
+                    self.assertIn(f"{expected}: v2.0", text.lower())
+                    self.assertNotIn(unexpected, text.lower())
+                    self.assertIn(f"Core (ai-agent-common): {current}", text)
+                    if updatable:
+                        self.assertIn("updatable", text)
+                        self.assertIn("/core update <bot>", text)
+                    else:
+                        self.assertIn("Up to date", text)
+
     def test_outdated_notice_is_silent_when_current(self) -> None:
         status = CoreStatus("v2.0", "v2.0", False, True)
         with patch("ai_agent_common.core_command.core_status", return_value=status):

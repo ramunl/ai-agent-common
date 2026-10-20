@@ -28,12 +28,14 @@ class CoreCommand:
     def status_text(self, check_remote: bool = True) -> str:
         status = core_status(self.submodule_dir, check_remote=check_remote)
         line = f"Core (ai-agent-common): {status.current}"
+        checked = (
+            "latest available" if status.checked_remote else "latest known locally"
+        )
         if status.updatable:
             return (
-                f"{line}\nLatest: {status.latest} — updatable.\n"
+                f"{line}\n{checked.capitalize()}: {status.latest} — updatable.\n"
                 "Update is run from the coding agent: /core update <bot>."
             )
-        checked = "latest available" if status.checked_remote else "latest known locally"
         return f"{line}\nUp to date ({checked}: {status.latest})."
 
     def short_line(self) -> str:
