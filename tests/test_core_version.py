@@ -190,6 +190,38 @@ class BumpTests(unittest.TestCase):
         self.assertFalse(changed)
         self.assertIn("already", msg.lower())
 
+    def test_bump_leaves_unrelated_staged_file_out_of_commit(self) -> None:
+        (self.super / "unrelated.txt").write_text("wip")
+        _git(self.super, "add", "unrelated.txt")
+        sub = self.super / "ai_agent_common"
+        changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+        self.assertTrue(changed, msg)
+
+        committed = subprocess.run(
+            ["git", "-C", str(self.super), "show", "--name-only", "--format=", "HEAD"],
+            capture_output=True,
+            check=True,
+            text=True,
+        ).stdout.split()
+        self.assertEqual(committed, ["ai_agent_common"])
+
+        status = subprocess.run(
+            ["git", "-C", str(self.super), "status", "--porcelain"],
+            capture_output=True,
+            check=True,
+            text=True,
+        ).stdout
+        self.assertIn("A  unrelated.txt", status)
+
+    def test_bump_rejects_unsafe_submodule_path(self) -> None:
+        sub = self.super / "ai_agent_common"
+        for bad in ["", "/etc", "../escape", "-n", ".", "ai\nagent"]:
+            with self.subTest(path=bad):
+                changed, msg = cv.bump_to_latest(sub, self.super, bad)
+                self.assertFalse(changed)
+                self.assertIn("invalid submodule path", msg)
+        self.assertEqual(cv.current_version(sub), "v1.0")
+
 
 if __name__ == "__main__":
     unittest.main()
