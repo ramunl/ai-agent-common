@@ -158,6 +158,40 @@ def bump_to_latest(
     current = _base_tag(current_version(submodule_dir))
     already_latest = current == latest
     if already_latest:
+        code, branch = _git(superproject_dir, "symbolic-ref", "HEAD")
+        if code != 0:
+            return False, f"Could not verify core bump publication: {branch}"
+        code, upstream = _git(
+            superproject_dir,
+            "for-each-ref",
+            "--format=%(upstream:remotename) %(upstream:remoteref)",
+            branch,
+        )
+        upstream_parts = upstream.split()
+        if code != 0 or len(upstream_parts) != 2:
+            return False, (
+                "Could not verify core bump publication: "
+                f"could not resolve superproject upstream ({upstream})."
+            )
+        remote, remote_ref = upstream_parts
+        # Fetch the configured upstream explicitly, even with custom fetch
+        # refspecs. FETCH_HEAD avoids relying on a stale tracking ref.
+        code, out = _git(superproject_dir, "fetch", "--no-tags", remote, remote_ref)
+        if code != 0:
+            return False, f"Could not verify core bump publication: fetch failed: {out}"
+        code, out = _git(superproject_dir, "rev-list", "--count", "FETCH_HEAD..HEAD")
+        if code != 0 or not out.isdecimal():
+            return False, f"Could not verify core bump publication: {out}"
+        if int(out) > 0:
+            # Keep the existing normal push behavior, including rejection of
+            # divergent history and publication of other pending commits.
+            code, out = _git(superproject_dir, "push")
+            if code != 0:
+                return (
+                    False,
+                    f"Core bump to {latest} is unpublished; push failed: {out}",
+                )
+            return True, f"Core bump to {latest} published on retry."
         return False, f"Core already on the latest release ({latest})."
 
     code, out = _git(submodule_dir, "checkout", f"tags/{latest}")

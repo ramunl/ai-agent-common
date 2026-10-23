@@ -182,13 +182,143 @@ class BumpTests(unittest.TestCase):
         changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
         self.assertTrue(changed, msg)
         self.assertEqual(cv.current_version(sub), "v2.0")
+        self.assertEqual(
+            self._revision(self.tmp / "super.git", "main:ai_agent_common"),
+            self._revision(sub, "v2.0"),
+        )
+
+    def _revision(self, repo: Path, ref: str = "HEAD") -> str:
+        code, out = cv._git(repo, "rev-parse", ref)
+        self.assertEqual(code, 0, out)
+        return out
+
+    def _reject_push(self) -> Path:
+        hook = self.tmp / "super.git" / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        return hook
+
+    def test_retry_publishes_failed_bump_without_duplicate_commit(self) -> None:
+        sub = self.super / "ai_agent_common"
+        origin = self.tmp / "super.git"
+        old_pin = self._revision(origin, "main:ai_agent_common")
+        hook = self._reject_push()
+        changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+        self.assertFalse(changed)
+        self.assertIn("push failed", msg)
+        bump_commit = self._revision(self.super)
+        self.assertEqual(self._revision(origin, "main:ai_agent_common"), old_pin)
+
+        hook.unlink()
+        with patch.object(cv, "_git", wraps=cv._git) as git:
+            changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+        self.assertTrue(changed, msg)
+        self.assertEqual(self._revision(self.super), bump_commit)
+        self.assertEqual(self._revision(origin, "main"), bump_commit)
+        self.assertEqual(
+            self._revision(origin, "main:ai_agent_common"),
+            self._revision(sub, "v2.0"),
+        )
+        self.assertFalse(
+            any(
+                "checkout" in call.args or "commit" in call.args
+                for call in git.call_args_list
+            )
+        )
+
+    def test_retry_reports_repeated_push_failure(self) -> None:
+        sub = self.super / "ai_agent_common"
+        self._reject_push()
+        original_remote = self._revision(self.tmp / "super.git", "main")
+        changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+        self.assertFalse(changed)
+        self.assertIn("push failed", msg)
+        bump_commit = self._revision(self.super)
+        for _ in range(2):
+            changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+            self.assertFalse(changed)
+            self.assertIn("push failed", msg)
+            self.assertEqual(self._revision(self.super), bump_commit)
+            self.assertEqual(
+                self._revision(self.tmp / "super.git", "main"), original_remote
+            )
+
+    def test_already_latest_requires_upstream_verification(self) -> None:
+        sub = self.super / "ai_agent_common"
+        changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+        self.assertTrue(changed, msg)
+        for failure in ("missing upstream", "fetch", "comparison", "detached HEAD"):
+            with self.subTest(failure=failure):
+                if failure == "missing upstream":
+                    _git(self.super, "branch", "--unset-upstream")
+                elif failure == "fetch":
+                    _git(self.super, "branch", "--set-upstream-to=origin/main")
+                    _git(
+                        self.super,
+                        "remote",
+                        "set-url",
+                        "origin",
+                        str(self.tmp / "missing.git"),
+                    )
+                else:
+                    _git(
+                        self.super,
+                        "remote",
+                        "set-url",
+                        "origin",
+                        str(self.tmp / "super.git"),
+                    )
+                if failure == "detached HEAD":
+                    _git(self.super, "checkout", "--detach")
+                real_git = cv._git
+
+                def git_result(cwd, *args, **kwargs):
+                    if failure == "comparison" and args[0] == "rev-list":
+                        return 1, "comparison failed"
+                    return real_git(cwd, *args, **kwargs)
+
+                with patch.object(cv, "_git", side_effect=git_result) as git:
+                    changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+                self.assertFalse(changed)
+                self.assertIn("Could not verify core bump publication", msg)
+                self.assertFalse(
+                    any("push" in call.args for call in git.call_args_list)
+                )
+
+    def test_retry_does_not_force_push_divergent_history(self) -> None:
+        sub = self.super / "ai_agent_common"
+        hook = self._reject_push()
+        changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+        self.assertFalse(changed)
+        self.assertIn("push failed", msg)
+        bump_commit = self._revision(self.super)
+        hook.unlink()
+
+        other = self.tmp / "other"
+        _git(self.tmp, "clone", str(self.tmp / "super.git"), str(other))
+        (other / "app.txt").write_text("another change")
+        _git(other, "commit", "-am", "other change")
+        _git(other, "push")
+        remote_commit = self._revision(other)
+
+        changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+        self.assertFalse(changed)
+        self.assertIn("push failed", msg)
+        self.assertEqual(self._revision(self.super), bump_commit)
+        self.assertEqual(self._revision(self.tmp / "super.git", "main"), remote_commit)
+        self.assertEqual(self._revision(self.super, "FETCH_HEAD"), remote_commit)
 
     def test_bump_idempotent_when_already_latest(self) -> None:
         sub = self.super / "ai_agent_common"
-        cv.bump_to_latest(sub, self.super, "ai_agent_common")
         changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+        self.assertTrue(changed, msg)
+        bump_commit = self._revision(self.super)
+        with patch.object(cv, "_git", wraps=cv._git) as git:
+            changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
         self.assertFalse(changed)
         self.assertIn("already", msg.lower())
+        self.assertEqual(self._revision(self.super), bump_commit)
+        self.assertFalse(any("push" in call.args for call in git.call_args_list))
 
     def test_bump_leaves_unrelated_staged_file_out_of_commit(self) -> None:
         (self.super / "unrelated.txt").write_text("wip")
