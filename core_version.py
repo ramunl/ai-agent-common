@@ -37,6 +37,16 @@ def _parse(tag: str) -> tuple[int, int, int] | None:
     return (parts[0], parts[1], parts[2])
 
 
+def _is_safe_submodule_path(submodule_path: str) -> bool:
+    """A non-empty, relative path inside the superproject; no '..' or options."""
+    if not submodule_path or submodule_path.startswith("-"):
+        return False
+    path = Path(submodule_path)
+    if path.is_absolute() or ".." in path.parts or path.parts in ((), (".",)):
+        return False
+    return "\n" not in submodule_path
+
+
 def _base_tag(describe: str) -> str:
     """'v1.0-3-gabc123' -> 'v1.0'; a plain 'v1.0' is returned unchanged."""
     return describe.split("-", 1)[0]
@@ -129,13 +139,16 @@ def bump_to_latest(
 ) -> tuple[bool, str]:
     """Move the pin to the latest core tag, commit and push the superproject.
 
-    Returns (changed, message). changed=True also means an unpublished bump
-    was successfully pushed on retry, without creating another commit.
-    changed=False with ok message means 'already on latest', with no unpushed
-    commits relative to the refreshed upstream. Verification or push failures
-    return False with an error. This is the deliberate adopt-new-core step;
-    a deploy afterward (or the caller) makes it live.
+    Returns (changed, message). changed=False with ok message means 'already
+    on latest'. This is the deliberate adopt-new-core step; a deploy afterward
+    (or the caller) makes it live.
+
+    Only the submodule pointer is committed (pathspec), so unrelated changes
+    already staged in the superproject stay staged and out of the bump.
     """
+    if not _is_safe_submodule_path(submodule_path):
+        return False, f"Refusing core bump: invalid submodule path {submodule_path!r}"
+
     _git(submodule_dir, "fetch", "--tags", "--prune", "--prune-tags", "--quiet")
     latest, _ = latest_version(submodule_dir, fetch=False)
     has_latest = latest is not None
@@ -186,7 +199,30 @@ def bump_to_latest(
     if not checked_out:
         return False, f"Could not checkout core {latest}: {out}"
 
-    _git(superproject_dir, "add", submodule_path)
+    _git(superproject_dir, "add", "--", submodule_path)
+    _, staged = _git(superproject_dir, "diff", "--cached", "--name-only")
+    others_staged = [
+        name for name in staged.splitlines() if name and name != submodule_path
+    ]
+    if others_staged:
+        logger.warning(
+            "Core bump commits only %s; leaving other staged files out: %s",
+            submodule_path,
+            ", ".join(others_staged),
+        )
+
+    pointer_code, _ = _git(
+        superproject_dir, "diff", "--cached", "--quiet", "--", submodule_path
+    )
+    pointer_unchanged = pointer_code == 0
+    if pointer_unchanged:
+        logger.info(
+            "Core pointer %s is already at %s; nothing to commit.",
+            submodule_path,
+            latest,
+        )
+        return False, f"Core pointer already at {latest}; nothing to commit."
+
     code, out = _git(
         superproject_dir,
         "-c",
@@ -196,6 +232,8 @@ def bump_to_latest(
         "commit",
         "-m",
         f"bump core to {latest}",
+        "--",
+        submodule_path,
     )
     committed = code == 0
     if not committed:
