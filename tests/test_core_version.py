@@ -394,8 +394,8 @@ class CreateReleaseTests(unittest.TestCase):
         )
         _git(self.work, "push", "origin", "v1.0")
 
-    def _add_real_commit(self):
-        (self.work / "f").write_text("2")
+    def _add_real_commit(self, content="2"):
+        (self.work / "f").write_text(content)
         _git(self.work, "add", "-A")
         _git(self.work, "commit", "-m", "real")
         _git(self.work, "push", "origin", "main")
@@ -466,3 +466,107 @@ class CreateReleaseTests(unittest.TestCase):
             text=True,
         )
         self.assertIn("v2.0", result.stdout)
+
+    def _assert_no_release(self, git, version):
+        self.assertFalse(
+            any(
+                call.args[1] == "push" or call.args[1:3] == ("tag", "-a")
+                for call in git.call_args_list
+            )
+        )
+        for repo in (self.work, self.tmp / "origin.git"):
+            code, tags = cv._git(repo, "tag", "-l")
+            self.assertEqual(code, 0, tags)
+            self.assertNotIn(version, tags.splitlines())
+
+    def test_annotated_release_requires_new_commit_before_next_release(self):
+        self._add_real_commit()
+        ok, msg = cv.create_release(self.work, "v2.0", "first change")
+        self.assertTrue(ok, msg)
+        self.assertEqual(cv._git(self.work, "cat-file", "-t", "v2.0"), (0, "tag"))
+
+        with patch.object(cv, "_git", wraps=cv._git) as git:
+            ok, msg = cv.create_release(self.work, "v3.0", "no change")
+        self._assert_no_release(git, "v3.0")
+        self.assertFalse(ok)
+        self.assertIn("no new commits", msg)
+
+        self._add_real_commit("3")
+        ok, msg = cv.create_release(self.work, "v3.0", "second change")
+        self.assertTrue(ok, msg)
+        self.assertEqual(
+            cv._git(self.tmp / "origin.git", "rev-parse", "v3.0^{commit}"),
+            cv._git(self.work, "rev-parse", "origin/main"),
+        )
+
+    def test_first_release_without_tags(self):
+        _git(self.work, "tag", "-d", "v1.0")
+        _git(self.work, "push", "origin", ":refs/tags/v1.0")
+        ok, msg = cv.create_release(self.work, "v1.0", "initial release")
+        self.assertTrue(ok, msg)
+        self.assertEqual(
+            cv._git(self.tmp / "origin.git", "rev-parse", "v1.0^{commit}"),
+            cv._git(self.work, "rev-parse", "origin/main"),
+        )
+
+    def test_rejects_older_main(self):
+        self._add_real_commit()
+        _git(self.work, "tag", "-a", "v2.0", "-m", "release")
+        _git(self.work, "push", "origin", "v2.0")
+        _git(self.work, "reset", "--hard", "v1.0")
+        _git(self.work, "push", "--force", "origin", "main")
+        with patch.object(cv, "_git", wraps=cv._git) as git:
+            ok, msg = cv.create_release(self.work, "v3.0", "older main")
+        self._assert_no_release(git, "v3.0")
+        self.assertFalse(ok)
+        self.assertIn("not a descendant", msg)
+
+    def test_rejects_divergent_main(self):
+        _git(self.work, "checkout", "-b", "release")
+        _git(self.work, "commit", "--allow-empty", "-m", "release branch")
+        _git(self.work, "tag", "-a", "v2.0", "-m", "release")
+        _git(self.work, "push", "origin", "v2.0")
+        _git(self.work, "checkout", "main")
+        self._add_real_commit()
+        with patch.object(cv, "_git", wraps=cv._git) as git:
+            ok, msg = cv.create_release(self.work, "v3.0", "divergent main")
+        self._assert_no_release(git, "v3.0")
+        self.assertFalse(ok)
+        self.assertIn("not a descendant", msg)
+
+    def _assert_command_failure(self, prefix, expected):
+        self._add_real_commit()
+        real_git = cv._git
+
+        def git_result(cwd, *args, **kwargs):
+            if args[: len(prefix)] == prefix:
+                return 128, "injected command failure"
+            return real_git(cwd, *args, **kwargs)
+
+        with patch.object(cv, "_git", side_effect=git_result) as git:
+            ok, msg = cv.create_release(self.work, "v2.0", "change")
+        self._assert_no_release(git, "v2.0")
+        self.assertFalse(ok)
+        self.assertIn(expected, msg)
+        self.assertIn("injected command failure", msg)
+
+    def test_rejects_failed_fetch(self):
+        self._assert_command_failure(("fetch",), "Could not fetch")
+
+    def test_rejects_failed_tag_listing(self):
+        self._assert_command_failure(("tag", "-l"), "Could not list")
+
+    def test_rejects_failed_main_resolution(self):
+        self._assert_command_failure(
+            ("rev-parse", "origin/main"), "Could not resolve origin/main"
+        )
+
+    def test_rejects_failed_tag_resolution(self):
+        self._assert_command_failure(
+            ("rev-parse", "--verify", "refs/tags/v1.0^{commit}"), "Could not resolve"
+        )
+
+    def test_rejects_failed_ancestry_check(self):
+        self._assert_command_failure(
+            ("merge-base", "--is-ancestor"), "Could not check ancestry"
+        )
