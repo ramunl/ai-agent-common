@@ -20,4 +20,11 @@ def effective_chat_id(update) -> int | None:
 
 def is_authorized(update, authorized_chat_id: int) -> bool:
     """True only for the single owner chat. Fails closed on anything else."""
-    return effective_chat_id(update) == authorized_chat_id
+    if (
+        not isinstance(authorized_chat_id, int)
+        or isinstance(authorized_chat_id, bool)
+        or authorized_chat_id == 0
+    ):
+        return False
+    chat_id = effective_chat_id(update)
+    return chat_id is not None and chat_id == authorized_chat_id
