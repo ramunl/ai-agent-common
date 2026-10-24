@@ -134,6 +134,45 @@ def core_status(submodule_dir: Path, check_remote: bool = True) -> CoreStatus:
     )
 
 
+def _publish_existing_bump(superproject_dir: Path, latest: str) -> tuple[bool, str]:
+    """Verify the upstream and retry a normal push for a committed pointer."""
+    code, branch = _git(superproject_dir, "symbolic-ref", "HEAD")
+    if code != 0:
+        return False, f"Could not verify core bump publication: {branch}"
+    code, upstream = _git(
+        superproject_dir,
+        "for-each-ref",
+        "--format=%(upstream:remotename) %(upstream:remoteref)",
+        branch,
+    )
+    upstream_parts = upstream.split()
+    if code != 0 or len(upstream_parts) != 2:
+        return False, (
+            "Could not verify core bump publication: "
+            f"could not resolve superproject upstream ({upstream})."
+        )
+    remote, remote_ref = upstream_parts
+    # Fetch the configured upstream explicitly, even with custom fetch
+    # refspecs. FETCH_HEAD avoids relying on a stale tracking ref.
+    code, out = _git(superproject_dir, "fetch", "--no-tags", remote, remote_ref)
+    if code != 0:
+        return False, f"Could not verify core bump publication: fetch failed: {out}"
+    code, out = _git(superproject_dir, "rev-list", "--count", "FETCH_HEAD..HEAD")
+    if code != 0 or not out.isdecimal():
+        return False, f"Could not verify core bump publication: {out}"
+    if int(out) > 0:
+        # Keep the existing normal push behavior, including rejection of
+        # divergent history and publication of other pending commits.
+        code, out = _git(superproject_dir, "push")
+        if code != 0:
+            return (
+                False,
+                f"Core bump to {latest} is unpublished; push failed: {out}",
+            )
+        return True, f"Core bump to {latest} published on retry."
+    return False, f"Core already on the latest release ({latest})."
+
+
 def bump_to_latest(
     submodule_dir: Path, superproject_dir: Path, submodule_path: str
 ) -> tuple[bool, str]:
@@ -155,51 +194,37 @@ def bump_to_latest(
     if not has_latest:
         return False, "No tagged core releases found to update to."
 
-    current = _base_tag(current_version(submodule_dir))
-    already_latest = current == latest
-    if already_latest:
-        code, branch = _git(superproject_dir, "symbolic-ref", "HEAD")
+    code, target = _git(
+        submodule_dir, "rev-parse", "--verify", f"refs/tags/{latest}^{{commit}}"
+    )
+    if code != 0:
+        return False, f"Could not resolve core release {latest}: {target}"
+    code, current = _git(submodule_dir, "rev-parse", "--verify", "HEAD")
+    if code != 0:
+        return False, f"Could not resolve core HEAD: {current}"
+    code, pointer = _git(
+        superproject_dir, "rev-parse", "--verify", f"HEAD:{submodule_path}"
+    )
+    if code != 0:
+        return False, f"Could not resolve committed core pointer: {pointer}"
+    if current != target:
+        code, out = _git(submodule_dir, "checkout", "--detach", target)
         if code != 0:
-            return False, f"Could not verify core bump publication: {branch}"
-        code, upstream = _git(
-            superproject_dir,
-            "for-each-ref",
-            "--format=%(upstream:remotename) %(upstream:remoteref)",
-            branch,
-        )
-        upstream_parts = upstream.split()
-        if code != 0 or len(upstream_parts) != 2:
-            return False, (
-                "Could not verify core bump publication: "
-                f"could not resolve superproject upstream ({upstream})."
-            )
-        remote, remote_ref = upstream_parts
-        # Fetch the configured upstream explicitly, even with custom fetch
-        # refspecs. FETCH_HEAD avoids relying on a stale tracking ref.
-        code, out = _git(superproject_dir, "fetch", "--no-tags", remote, remote_ref)
-        if code != 0:
-            return False, f"Could not verify core bump publication: fetch failed: {out}"
-        code, out = _git(superproject_dir, "rev-list", "--count", "FETCH_HEAD..HEAD")
-        if code != 0 or not out.isdecimal():
-            return False, f"Could not verify core bump publication: {out}"
-        if int(out) > 0:
-            # Keep the existing normal push behavior, including rejection of
-            # divergent history and publication of other pending commits.
-            code, out = _git(superproject_dir, "push")
-            if code != 0:
-                return (
-                    False,
-                    f"Core bump to {latest} is unpublished; push failed: {out}",
-                )
-            return True, f"Core bump to {latest} published on retry."
-        return False, f"Core already on the latest release ({latest})."
+            return False, f"Could not checkout core {latest}: {out}"
 
-    code, out = _git(submodule_dir, "checkout", f"tags/{latest}")
-    checked_out = code == 0
-    if not checked_out:
-        return False, f"Could not checkout core {latest}: {out}"
+    if pointer == target:
+        return _publish_existing_bump(superproject_dir, latest)
 
-    _git(superproject_dir, "add", "--", submodule_path)
+    return _commit_core_pointer(superproject_dir, submodule_path, latest)
+
+
+def _commit_core_pointer(
+    superproject_dir: Path, submodule_path: str, latest: str
+) -> tuple[bool, str]:
+    """Commit only the missing pointer, preserving unrelated staged changes."""
+    code, out = _git(superproject_dir, "add", "--", submodule_path)
+    if code != 0:
+        return False, f"Could not stage core bump: {out}"
     _, staged = _git(superproject_dir, "diff", "--cached", "--name-only")
     others_staged = [
         name for name in staged.splitlines() if name and name != submodule_path
@@ -210,18 +235,6 @@ def bump_to_latest(
             submodule_path,
             ", ".join(others_staged),
         )
-
-    pointer_code, _ = _git(
-        superproject_dir, "diff", "--cached", "--quiet", "--", submodule_path
-    )
-    pointer_unchanged = pointer_code == 0
-    if pointer_unchanged:
-        logger.info(
-            "Core pointer %s is already at %s; nothing to commit.",
-            submodule_path,
-            latest,
-        )
-        return False, f"Core pointer already at {latest}; nothing to commit."
 
     code, out = _git(
         superproject_dir,

@@ -343,6 +343,136 @@ class BumpTests(unittest.TestCase):
         ).stdout
         self.assertIn("A  unrelated.txt", status)
 
+    def _assert_published_latest(self, sub: Path) -> None:
+        target = self._revision(sub, "refs/tags/v2.0^{commit}")
+        self.assertEqual(self._revision(sub), target)
+        self.assertEqual(self._revision(self.super, "HEAD:ai_agent_common"), target)
+        self.assertEqual(
+            self._revision(self.tmp / "super.git", "main:ai_agent_common"), target
+        )
+
+    def test_retry_completes_failed_pointer_commit(self) -> None:
+        sub = self.super / "ai_agent_common"
+        original = self._revision(self.super)
+        hook = self.super / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+        self.assertFalse(changed)
+        self.assertIn("Could not commit", msg)
+        self.assertEqual(self._revision(self.super), original)
+        self.assertEqual(self._revision(sub), self._revision(sub, "v2.0"))
+        hook.unlink()
+        (self.super / "unrelated.txt").write_text("wip")
+        _git(self.super, "add", "unrelated.txt")
+        changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+        self.assertTrue(changed, msg)
+        self._assert_published_latest(sub)
+        self.assertEqual(
+            cv._git(self.super, "diff", "--cached", "--name-only"),
+            (0, "unrelated.txt"),
+        )
+        self.assertEqual(
+            cv._git(self.super, "show", "--format=", "--name-only", "HEAD"),
+            (0, "ai_agent_common"),
+        )
+
+    def test_bump_commits_missing_pin_staged_or_unstaged(self) -> None:
+        sub = self.super / "ai_agent_common"
+        original = self._revision(self.super)
+        for staged in (False, True):
+            with self.subTest(staged=staged):
+                _git(self.super, "reset", "--hard", original)
+                _git(sub, "checkout", "v2.0")
+                if staged:
+                    _git(self.super, "add", "ai_agent_common")
+                # Avoid rewriting remote history when restoring the test fixture.
+                _git(self.tmp / "super.git", "update-ref", "refs/heads/main", original)
+                changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+                self.assertTrue(changed, msg)
+                self._assert_published_latest(sub)
+
+    def test_bump_reports_add_failure_without_commit_or_push(self) -> None:
+        sub = self.super / "ai_agent_common"
+        original = self._revision(self.super)
+        real_git = cv._git
+
+        def git_result(cwd, *args, **kwargs):
+            if cwd == self.super and args[0] == "add":
+                return 1, "index locked"
+            return real_git(cwd, *args, **kwargs)
+
+        with patch.object(cv, "_git", side_effect=git_result) as git:
+            changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+        self.assertFalse(changed)
+        self.assertIn("Could not stage core bump", msg)
+        self.assertIn("index locked", msg)
+        self.assertEqual(self._revision(self.super), original)
+        self.assertFalse(
+            any(
+                "commit" in call.args or "push" in call.args
+                for call in git.call_args_list
+            )
+        )
+        changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+        self.assertTrue(changed, msg)
+        self._assert_published_latest(sub)
+
+    def test_bump_replaces_commit_beyond_latest_release(self) -> None:
+        sub = self.super / "ai_agent_common"
+        _git(sub, "checkout", "v2.0")
+        (sub / "c.txt").write_text("unreleased")
+        _git(sub, "commit", "-am", "beyond release")
+        _git(self.super, "add", "ai_agent_common")
+        _git(self.super, "commit", "-m", "pin unreleased core")
+        _git(self.super, "push")
+        self.assertTrue(cv.current_version(sub).startswith("v2.0-"))
+        changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+        self.assertTrue(changed, msg)
+        self._assert_published_latest(sub)
+
+    def test_bump_peels_annotated_release_tag(self) -> None:
+        sub = self.super / "ai_agent_common"
+        _git(self.tmp / "core.git", "tag", "-f", "-a", "v2.0", "-m", "release")
+        _git(sub, "tag", "-d", "v2.0")
+        changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+        self.assertTrue(changed, msg)
+        self.assertNotEqual(self._revision(sub, "v2.0"), self._revision(sub))
+        self._assert_published_latest(sub)
+        changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+        self.assertFalse(changed)
+        self.assertIn("already", msg)
+
+    def test_bump_reports_resolution_failures_before_mutation(self) -> None:
+        sub = self.super / "ai_agent_common"
+        for repo, ref in (
+            (sub, "refs/tags/v2.0^{commit}"),
+            (sub, "HEAD"),
+            (self.super, "HEAD:ai_agent_common"),
+        ):
+            with self.subTest(ref=ref):
+                real_git = cv._git
+
+                def git_result(
+                    cwd, *args, repo=repo, ref=ref, real_git=real_git, **kwargs
+                ):
+                    if cwd == repo and args[0] == "rev-parse" and args[-1] == ref:
+                        return 1, "resolution failed"
+                    return real_git(cwd, *args, **kwargs)
+
+                with patch.object(cv, "_git", side_effect=git_result) as git:
+                    changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+                self.assertFalse(changed)
+                self.assertIn("Could not resolve", msg)
+                self.assertIn("resolution failed", msg)
+                self.assertFalse(
+                    any(
+                        action in call.args
+                        for call in git.call_args_list
+                        for action in ("checkout", "add", "commit", "push")
+                    )
+                )
+
     def test_bump_rejects_unsafe_submodule_path(self) -> None:
         sub = self.super / "ai_agent_common"
         for bad in ["", "/etc", "../escape", "-n", ".", "ai\nagent"]:
