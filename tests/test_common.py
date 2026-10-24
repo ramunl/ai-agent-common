@@ -10,7 +10,9 @@ from ai_agent_common import agent_auth, agent_help, buttons
 
 class AuthTests(unittest.TestCase):
     def test_message_chat_id(self) -> None:
-        update = SimpleNamespace(message=SimpleNamespace(chat_id=42), effective_chat=None)
+        update = SimpleNamespace(
+            message=SimpleNamespace(chat_id=42), effective_chat=None
+        )
         self.assertTrue(agent_auth.is_authorized(update, 42))
         self.assertFalse(agent_auth.is_authorized(update, 99))
 
@@ -18,6 +20,35 @@ class AuthTests(unittest.TestCase):
         # A button tap has no .message chat_id at top level, but effective_chat works.
         update = SimpleNamespace(effective_chat=SimpleNamespace(id=42), message=None)
         self.assertTrue(agent_auth.is_authorized(update, 42))
+        self.assertFalse(agent_auth.is_authorized(update, 99))
+
+    def test_missing_owner_fails_closed(self) -> None:
+        updates = [
+            SimpleNamespace(message=SimpleNamespace(chat_id=42), effective_chat=None),
+            SimpleNamespace(effective_chat=SimpleNamespace(id=42), message=None),
+            SimpleNamespace(message=None, effective_chat=None),
+            SimpleNamespace(),
+        ]
+        for update in updates:
+            with self.subTest(update=update):
+                self.assertFalse(agent_auth.is_authorized(update, None))
+
+    def test_invalid_owner_fails_closed(self) -> None:
+        for owner_id in (0, True, False, "42", "", 42.0, -42.0, [], {}):
+            for chat_id in (owner_id, 42, None):
+                with self.subTest(owner_id=owner_id, chat_id=chat_id):
+                    update = SimpleNamespace(effective_chat=SimpleNamespace(id=chat_id))
+                    self.assertFalse(agent_auth.is_authorized(update, owner_id))
+
+    def test_negative_chat_ids(self) -> None:
+        updates = [
+            SimpleNamespace(message=SimpleNamespace(chat_id=-42), effective_chat=None),
+            SimpleNamespace(effective_chat=SimpleNamespace(id=-42), message=None),
+        ]
+        for update in updates:
+            with self.subTest(update=update):
+                self.assertTrue(agent_auth.is_authorized(update, -42))
+                self.assertFalse(agent_auth.is_authorized(update, 42))
 
     def test_unknown_shape_fails_closed(self) -> None:
         update = SimpleNamespace(message=None, effective_chat=None)
@@ -87,7 +118,9 @@ class ButtonTests(unittest.TestCase):
     def test_callback_data_roundtrip(self) -> None:
         data = buttons.make_callback_data("repo_use", "channel-cast")
         self.assertEqual(data, "repo_use:channel-cast")
-        self.assertEqual(buttons.parse_callback_data(data), ("repo_use", "channel-cast"))
+        self.assertEqual(
+            buttons.parse_callback_data(data), ("repo_use", "channel-cast")
+        )
 
     def test_callback_data_without_arg(self) -> None:
         self.assertEqual(buttons.make_callback_data("approve"), "approve")
@@ -116,8 +149,7 @@ class ButtonTests(unittest.TestCase):
         marker = object()
         router.register("command", marker)
 
-        for data, command in (("command:help", "help"),
-                              ("command:version", "version")):
+        for data, command in (("command:help", "help"), ("command:version", "version")):
             with self.subTest(data=data):
                 handler, arg = router.resolve(data)
                 self.assertIs(handler, marker)
