@@ -14,14 +14,14 @@ _SEPARATOR = ":"
 
 
 def make_callback_data(action: str, arg: str = "") -> str:
+    if not action or _SEPARATOR in action:
+        raise ValueError("callback action must be non-empty and contain no colons")
     has_arg = bool(arg)
     data = f"{action}{_SEPARATOR}{arg}" if has_arg else action
     within_limit = len(data.encode("utf-8")) <= CALLBACK_DATA_LIMIT
     if within_limit:
         return data
-    raise ValueError(
-        f"callback_data exceeds {CALLBACK_DATA_LIMIT} bytes: {data!r}"
-    )
+    raise ValueError(f"callback_data exceeds {CALLBACK_DATA_LIMIT} bytes: {data!r}")
 
 
 def parse_callback_data(data: str) -> tuple[str, str]:
@@ -45,8 +45,9 @@ def keyboard(options: list[tuple[str, str]], columns: int = 2):
     return InlineKeyboardMarkup(rows)
 
 
-def choice_keyboard(action: str, items: list[str], active: str | None = None,
-                    columns: int = 2):
+def choice_keyboard(
+    action: str, items: list[str], active: str | None = None, columns: int = 2
+):
     """A keyboard where each item fires the same action with its value.
 
     The active item (if any) is marked so the current selection is visible —
@@ -65,10 +66,12 @@ def command_keyboard():
     Both buttons use the ``command`` callback namespace. Register that action
     with :class:`CallbackRouter` and dispatch on the supplied command name.
     """
-    return keyboard([
-        ("Help", make_callback_data("command", "help")),
-        ("Version", make_callback_data("command", "version")),
-    ])
+    return keyboard(
+        [
+            ("Help", make_callback_data("command", "help")),
+            ("Version", make_callback_data("command", "version")),
+        ]
+    )
 
 
 class CallbackRouter:
@@ -85,18 +88,29 @@ class CallbackRouter:
     def register(self, action: str, handler) -> None:
         self._handlers[action] = handler
 
-    def resolve(self, data: str):
+    def resolve(self, data: object):
         """Return (handler, arg) for callback data, handler None if unregistered.
 
         Pure and synchronous, so routing is unit-testable without a running bot.
         """
+        if not isinstance(data, str):
+            return None, ""
+        try:
+            if len(data.encode("utf-8")) > CALLBACK_DATA_LIMIT:
+                return None, ""
+        except UnicodeEncodeError:
+            return None, ""
         action, arg = parse_callback_data(data)
+        if not action:
+            return None, ""
         return self._handlers.get(action), arg
 
     async def dispatch(self, update, context) -> None:
-        query = update.callback_query
-        handler, arg = self.resolve(query.data)
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
         await query.answer()
+        handler, arg = self.resolve(query.data)
         has_handler = handler is not None
         if has_handler:
             await handler(update, context, arg)
