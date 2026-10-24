@@ -251,7 +251,7 @@ def create_release(core_dir: Path, version: str, note: str) -> tuple[bool, str]:
     """Tag origin/main of ai-agent-common as a new release. Hub-only action.
 
     Guards, in order: valid version format; a note is required; origin/main
-    must be AHEAD of the latest tag (no hollow re-tag); version must be
+    must be a strict descendant of the latest tag (no hollow re-tag); version must be
     strictly higher than the latest release; the tag must not already exist.
     Tags origin/main directly, so it never disturbs the submodule's pinned
     checkout. Rolls back the local tag if the push fails.
@@ -268,7 +268,7 @@ def create_release(core_dir: Path, version: str, note: str) -> tuple[bool, str]:
             "A release note is required: /core release <version> <what changed>.",
         )
 
-    _git(
+    code, out = _git(
         core_dir,
         "fetch",
         "origin",
@@ -278,21 +278,42 @@ def create_release(core_dir: Path, version: str, note: str) -> tuple[bool, str]:
         "--prune-tags",
         "--quiet",
     )
+    if code != 0:
+        return False, f"Could not fetch core releases: {out}"
 
     code, main_commit = _git(core_dir, "rev-parse", "origin/main")
     if code != 0:
         return False, f"Could not resolve origin/main: {main_commit}"
 
-    latest, _ = latest_version(core_dir, fetch=False)
+    # Unlike status reporting, a release must distinguish a failed listing
+    # from a repository with no releases yet.
+    code, out = _git(core_dir, "tag", "-l")
+    if code != 0:
+        return False, f"Could not list core release tags: {out}"
+    latest = latest_tag(out.splitlines())
     has_latest = latest is not None
     if has_latest:
-        _, latest_commit = _git(core_dir, "rev-parse", f"refs/tags/{latest}")
+        code, latest_commit = _git(
+            core_dir, "rev-parse", "--verify", f"refs/tags/{latest}^{{commit}}"
+        )
+        if code != 0:
+            return False, f"Could not resolve core release {latest}: {latest_commit}"
         no_new_commits = main_commit == latest_commit
         if no_new_commits:
             return False, (
                 f"origin/main is already tagged {latest} - no new commits to "
                 "release. Change and push core code first, then release."
             )
+        code, out = _git(
+            core_dir, "merge-base", "--is-ancestor", latest_commit, main_commit
+        )
+        if code == 1:
+            return False, (
+                f"origin/main is not a descendant of the latest release {latest}; "
+                "its history is divergent or older."
+            )
+        if code != 0:
+            return False, f"Could not check ancestry of core release {latest}: {out}"
         not_higher = new_key <= _parse(latest)
         if not_higher:
             return False, f"{version} is not higher than the latest release {latest}."
