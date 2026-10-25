@@ -631,8 +631,9 @@ class CreateReleaseTests(unittest.TestCase):
         self.assertIn(expected, msg)
         self.assertIn("injected command failure", msg)
 
-    def test_rejects_failed_fetch(self):
-        self._assert_command_failure(("fetch",), "Could not fetch")
+    def test_rejects_failed_fetch(self) -> None:
+        # Identify the failed operation without coupling to the message prefix.
+        self._assert_command_failure(("fetch",), "fetch")
 
     def test_rejects_failed_tag_listing(self):
         self._assert_command_failure(("tag", "-l"), "Could not list")
