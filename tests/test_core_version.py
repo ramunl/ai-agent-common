@@ -187,6 +187,22 @@ class BumpTests(unittest.TestCase):
             self._revision(sub, "v2.0"),
         )
 
+    def test_bump_stops_after_failed_initial_fetch_with_cached_releases(self) -> None:
+        sub = self.super / "ai_agent_common"
+        self.assertEqual(cv.latest_version(sub, fetch=False), ("v2.0", False))
+        _git(sub, "remote", "set-url", "origin", str(self.tmp / "missing.git"))
+        fetch_args = ("fetch", "--tags", "--prune", "--prune-tags", "--quiet")
+        code, output = cv._git(sub, *fetch_args)
+        self.assertNotEqual(code, 0)
+
+        with patch.object(cv, "_git", wraps=cv._git) as git:
+            changed, msg = cv.bump_to_latest(sub, self.super, "ai_agent_common")
+
+        git.assert_called_once_with(sub, *fetch_args)
+        self.assertFalse(changed)
+        self.assertIn("fetch failed", msg)
+        self.assertIn(output, msg)
+
     def _revision(self, repo: Path, ref: str = "HEAD") -> str:
         code, out = cv._git(repo, "rev-parse", ref)
         self.assertEqual(code, 0, out)
@@ -518,6 +534,39 @@ class CreateReleaseTests(unittest.TestCase):
         ok, msg = cv.create_release(self.work, "two", "note")
         self.assertFalse(ok)
         self.assertIn("valid version", msg)
+
+    def test_release_stops_after_failed_initial_fetch_with_stale_main(self):
+        self._add_real_commit()
+        other = self.tmp / "other"
+        _git(self.tmp, "clone", str(self.tmp / "origin.git"), str(other))
+        (other / "f").write_text("3")
+        _git(other, "commit", "-am", "newer remote commit")
+        _git(other, "push", "origin", "main")
+        self.assertNotEqual(
+            cv._git(self.work, "rev-parse", "origin/main"),
+            cv._git(other, "rev-parse", "HEAD"),
+        )
+        self.assertEqual(cv.latest_version(self.work, fetch=False), ("v1.0", False))
+        _git(self.work, "remote", "set-url", "origin", str(self.tmp / "missing.git"))
+        fetch_args = (
+            "fetch",
+            "origin",
+            "main",
+            "--tags",
+            "--prune",
+            "--prune-tags",
+            "--quiet",
+        )
+        code, output = cv._git(self.work, *fetch_args)
+        self.assertNotEqual(code, 0)
+
+        with patch.object(cv, "_git", wraps=cv._git) as git:
+            ok, msg = cv.create_release(self.work, "v2.0", "real change")
+
+        git.assert_called_once_with(self.work, *fetch_args)
+        self.assertFalse(ok)
+        self.assertIn("fetch failed", msg)
+        self.assertIn(output, msg)
 
     def test_requires_note(self):
         self._add_real_commit()

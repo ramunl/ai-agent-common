@@ -188,7 +188,12 @@ def bump_to_latest(
     if not _is_safe_submodule_path(submodule_path):
         return False, f"Refusing core bump: invalid submodule path {submodule_path!r}"
 
-    _git(submodule_dir, "fetch", "--tags", "--prune", "--prune-tags", "--quiet")
+    code, out = _git(
+        submodule_dir, "fetch", "--tags", "--prune", "--prune-tags", "--quiet"
+    )
+    if code != 0:
+        return False, f"Could not bump core: fetch failed: {out}"
+
     latest, _ = latest_version(submodule_dir, fetch=False)
     has_latest = latest is not None
     if not has_latest:
@@ -292,7 +297,7 @@ def create_release(core_dir: Path, version: str, note: str) -> tuple[bool, str]:
         "--quiet",
     )
     if code != 0:
-        return False, f"Could not fetch core releases: {out}"
+        return False, f"Could not create core release: fetch failed: {out}"
 
     code, main_commit = _git(core_dir, "rev-parse", "origin/main")
     if code != 0:
